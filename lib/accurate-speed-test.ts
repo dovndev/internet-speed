@@ -20,12 +20,23 @@ interface SpeedTestProgress {
   }
 }
 
+export type SpeedTestLibrary = "cloudflare" | "network-speed" | "ng-speed-test" | "fallback"
+
 export class AccurateSpeedTestService {
   private abortController: AbortController | null = null
   private isRunning = false
   private pingInterval: NodeJS.Timeout | null = null
   private lastPingValue = 0
   private lastJitterValue = 0
+  private library: SpeedTestLibrary = "fallback"
+
+  constructor(library: SpeedTestLibrary = "fallback") {
+    this.library = library
+  }
+
+  setLibrary(library: SpeedTestLibrary) {
+    this.library = library
+  }
 
   async runSpeedTest(onProgress: (progress: SpeedTestProgress) => void): Promise<SpeedTestResult> {
     this.abortController = new AbortController()

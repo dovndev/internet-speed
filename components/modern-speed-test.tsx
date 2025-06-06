@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
@@ -21,12 +21,19 @@ import {
   MapPin,
   TrendingUp,
   BarChart3,
-  Gauge,
   Signal,
   Router,
+  Cloud,
+  Network,
+  Code,
+  Server,
+  Gauge,
 } from "lucide-react"
 import { useAccurateSpeedTest } from "@/hooks/use-accurate-speed-test"
-import type { SpeedUnit } from "@/lib/speed-test-libraries"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import type { SpeedTestLibrary } from "@/lib/accurate-speed-test"
+
+type SpeedUnit = "Mbps" | "Kbps" | "MBps" | "KBps"
 
 interface DisplayConfig {
   showDownload: boolean
@@ -36,17 +43,65 @@ interface DisplayConfig {
   showPacketLoss: boolean
   showLiveGraphs: boolean
   speedUnit: SpeedUnit
+  speedTestLibrary: SpeedTestLibrary
+}
+
+interface TestHistoryEntry {
+  id: string
+  timestamp: Date
+  downloadSpeed: number
+  uploadSpeed: number
+  ping: number
+  jitter?: number
+  packetLoss?: number
+  library?: SpeedTestLibrary
 }
 
 export default function ModernSpeedTest() {
-  const [config, setConfig] = useState<DisplayConfig>({
-    showDownload: true,
-    showUpload: true,
-    showPing: true,
-    showJitter: true,
-    showPacketLoss: true,
-    showLiveGraphs: true,
-    speedUnit: "Mbps",
+  const [config, setConfig] = useState<DisplayConfig>(() => {
+    // Try to load from localStorage
+    if (typeof window !== "undefined") {
+      const savedConfig = localStorage.getItem("speedTestConfig")
+      if (savedConfig) {
+        try {
+          return JSON.parse(savedConfig)
+        } catch (e) {
+          console.error("Failed to parse saved config:", e)
+        }
+      }
+    }
+
+    // Default config
+    return {
+      showDownload: true,
+      showUpload: true,
+      showPing: true,
+      showJitter: true,
+      showPacketLoss: true,
+      showLiveGraphs: true,
+      speedUnit: "Mbps",
+      speedTestLibrary: "fallback",
+    }
+  })
+
+  const [testHistory, setTestHistory] = useState<TestHistoryEntry[]>(() => {
+    // Try to load from localStorage
+    if (typeof window !== "undefined") {
+      const savedHistory = localStorage.getItem("speedTestHistory")
+      if (savedHistory) {
+        try {
+          const parsed = JSON.parse(savedHistory)
+          // Convert string dates back to Date objects
+          return parsed.map((entry: any) => ({
+            ...entry,
+            timestamp: new Date(entry.timestamp),
+          }))
+        } catch (e) {
+          console.error("Failed to parse saved test history:", e)
+        }
+      }
+    }
+    return []
   })
 
   const [ispInfo, setIspInfo] = useState({
@@ -68,6 +123,7 @@ export default function ModernSpeedTest() {
   const downloadCanvasRef = useRef<HTMLCanvasElement>(null)
   const uploadCanvasRef = useRef<HTMLCanvasElement>(null)
   const pingCanvasRef = useRef<HTMLCanvasElement>(null)
+  const forceUpdateRef = useRef<NodeJS.Timeout | null>(null)
 
   const {
     isTestRunning,
@@ -80,7 +136,35 @@ export default function ModernSpeedTest() {
     runSpeedTest,
     stopTest,
     resetTest,
+    setLibrary,
   } = useAccurateSpeedTest()
+
+  // Set the library when config changes
+  useEffect(() => {
+    if (setLibrary) {
+      setLibrary(config.speedTestLibrary)
+    }
+  }, [config.speedTestLibrary, setLibrary])
+
+  // Force UI updates during test
+  useEffect(() => {
+    if (isTestRunning) {
+      forceUpdateRef.current = setInterval(() => {
+        // Force a re-render to update the UI with latest values
+        setGraphData((prev) => ({ ...prev }))
+      }, 100)
+    } else if (forceUpdateRef.current) {
+      clearInterval(forceUpdateRef.current)
+      forceUpdateRef.current = null
+    }
+
+    return () => {
+      if (forceUpdateRef.current) {
+        clearInterval(forceUpdateRef.current)
+        forceUpdateRef.current = null
+      }
+    }
+  }, [isTestRunning])
 
   // Fetch ISP info
   useEffect(() => {
@@ -244,13 +328,38 @@ export default function ModernSpeedTest() {
     return <canvas ref={canvasRef} width={200} height={60} className="w-full h-full" />
   }
 
-  const handleRunTest = async () => {
+  // Modify the runSpeedTest function to save results to history
+  const handleRunTest = useCallback(async () => {
     try {
-      await runSpeedTest()
-    } catch (error) {
-      console.error("Test failed:", error)
+      const results = await runSpeedTest()
+
+      // Save to test history if we have final results
+      if (results) {
+        const historyEntry: TestHistoryEntry = {
+          id: Date.now().toString(),
+          timestamp: new Date(),
+          downloadSpeed: results.downloadSpeed,
+          uploadSpeed: results.uploadSpeed,
+          ping: results.ping,
+          jitter: results.jitter,
+          packetLoss: results.packetLoss,
+          library: config.speedTestLibrary,
+        }
+
+        const updatedHistory = [historyEntry, ...testHistory].slice(0, 10) // Keep last 10 tests
+        setTestHistory(updatedHistory)
+
+        // Save to localStorage
+        if (typeof window !== "undefined") {
+          localStorage.setItem("speedTestHistory", JSON.stringify(updatedHistory))
+        }
+      }
+
+      return results
+    } catch (err) {
+      console.error("Test failed:", err)
     }
-  }
+  }, [runSpeedTest, testHistory, config.speedTestLibrary])
 
   const getPhaseMessage = () => {
     switch (testPhase) {
@@ -315,6 +424,52 @@ export default function ModernSpeedTest() {
     return 0
   }
 
+  // Get library display name
+  const getLibraryDisplayName = (library: SpeedTestLibrary) => {
+    switch (library) {
+      case "cloudflare":
+        return "Cloudflare SpeedTest"
+      case "network-speed":
+        return "Network Speed"
+      case "ng-speed-test":
+        return "NG Speed Test"
+      case "fallback":
+        return "Fallback Method"
+      default:
+        return library
+    }
+  }
+
+  // Get library icon
+  const getLibraryIcon = (library: SpeedTestLibrary) => {
+    switch (library) {
+      case "cloudflare":
+        return <Cloud className="w-4 h-4 mr-2" />
+      case "network-speed":
+        return <Network className="w-4 h-4 mr-2" />
+      case "ng-speed-test":
+        return <Code className="w-4 h-4 mr-2" />
+      case "fallback":
+        return <Server className="w-4 h-4 mr-2" />
+      default:
+        return null
+    }
+  }
+
+  // Save config to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("speedTestConfig", JSON.stringify(config))
+    }
+  }, [config])
+
+  // Debug output for live data
+  useEffect(() => {
+    if (isTestRunning) {
+      console.log("Live Data Update:", liveData)
+    }
+  }, [liveData, isTestRunning])
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
@@ -349,6 +504,26 @@ export default function ModernSpeedTest() {
               {error && (
                 <div className="max-w-md mx-auto mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
                   {error}
+                </div>
+              )}
+
+              {/* Current Library */}
+              <div className="flex items-center justify-center mb-4">
+                <Badge variant="outline" className="flex items-center gap-1 px-3 py-1">
+                  {getLibraryIcon(config.speedTestLibrary)}
+                  <span>Using {getLibraryDisplayName(config.speedTestLibrary)}</span>
+                </Badge>
+              </div>
+
+              {/* Live Data Debug (only during testing) */}
+              {isTestRunning && (
+                <div className="max-w-md mx-auto mb-4 p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs text-gray-500 dark:text-gray-400">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>Download: {(liveData?.currentDownload || 0).toFixed(2)} Mbps</div>
+                    <div>Upload: {(liveData?.currentUpload || 0).toFixed(2)} Mbps</div>
+                    <div>Ping: {(liveData?.currentPing || 0).toFixed(0)} ms</div>
+                    <div>Jitter: {(liveData?.currentJitter || 0).toFixed(1)} ms</div>
+                  </div>
                 </div>
               )}
 
@@ -486,8 +661,9 @@ export default function ModernSpeedTest() {
 
         {/* Tabs for Additional Info */}
         <Tabs defaultValue="details" className="mb-8">
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="details">Connection Details</TabsTrigger>
+            <TabsTrigger value="history">Test History</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
 
@@ -564,6 +740,78 @@ export default function ModernSpeedTest() {
                 </CardContent>
               </Card>
             </div>
+          </TabsContent>
+
+          <TabsContent value="history" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5" />
+                  Test History
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {testHistory.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                    No test history available yet. Run a test to see results here.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {testHistory.map((test) => (
+                      <div
+                        key={test.id}
+                        className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                      >
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm text-gray-500 dark:text-gray-400">
+                            {test.timestamp.toLocaleString()}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {test.library && (
+                              <Badge variant="outline" className="flex items-center gap-1">
+                                {getLibraryIcon(test.library)}
+                                <span className="text-xs">{getLibraryDisplayName(test.library)}</span>
+                              </Badge>
+                            )}
+                            <Badge variant="outline">{getQualityBadge(test.downloadSpeed, "download").label}</Badge>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-4">
+                          <div>
+                            <div className="text-sm text-gray-500 dark:text-gray-400">Download</div>
+                            <div className="font-medium">
+                              {test.downloadSpeed.toFixed(2)} {config.speedUnit}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-sm text-gray-500 dark:text-gray-400">Upload</div>
+                            <div className="font-medium">
+                              {test.uploadSpeed.toFixed(2)} {config.speedUnit}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-sm text-gray-500 dark:text-gray-400">Ping</div>
+                            <div className="font-medium">{test.ping.toFixed(0)} ms</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex justify-end mt-4">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setTestHistory([])
+                          localStorage.removeItem("speedTestHistory")
+                        }}
+                      >
+                        Clear History
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           <TabsContent value="settings" className="mt-4">
@@ -650,7 +898,95 @@ export default function ModernSpeedTest() {
                         </div>
                       ))}
                     </div>
+
+                    <h4 className="font-medium text-gray-900 dark:text-white mt-6">Test Library</h4>
+                    <div className="space-y-4">
+                      <Select
+                        value={config.speedTestLibrary}
+                        onValueChange={(value) => setConfig({ ...config, speedTestLibrary: value as SpeedTestLibrary })}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Select a test library" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="cloudflare" className="flex items-center">
+                            <div className="flex items-center">
+                              <Cloud className="w-4 h-4 mr-2" />
+                              <span>Cloudflare SpeedTest</span>
+                            </div>
+                          </SelectItem>
+                          <SelectItem value="network-speed">
+                            <div className="flex items-center">
+                              <Network className="w-4 h-4 mr-2" />
+                              <span>Network Speed</span>
+                            </div>
+                          </SelectItem>
+                          <SelectItem value="ng-speed-test">
+                            <div className="flex items-center">
+                              <Code className="w-4 h-4 mr-2" />
+                              <span>NG Speed Test</span>
+                            </div>
+                          </SelectItem>
+                          <SelectItem value="fallback">
+                            <div className="flex items-center">
+                              <Server className="w-4 h-4 mr-2" />
+                              <span>Fallback Method</span>
+                            </div>
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      <div className="text-sm text-gray-500 dark:text-gray-400">
+                        <h5 className="font-medium mb-1">Library Information:</h5>
+                        {config.speedTestLibrary === "cloudflare" && (
+                          <p>
+                            Cloudflare SpeedTest provides accurate measurements using Cloudflare's global network. Best
+                            for comprehensive testing.
+                          </p>
+                        )}
+                        {config.speedTestLibrary === "network-speed" && (
+                          <p>
+                            Network Speed is a lightweight module for basic speed testing. Good for quick checks with
+                            minimal overhead.
+                          </p>
+                        )}
+                        {config.speedTestLibrary === "ng-speed-test" && (
+                          <p>
+                            NG Speed Test offers customizable testing parameters and detailed metrics. Best for advanced
+                            users.
+                          </p>
+                        )}
+                        {config.speedTestLibrary === "fallback" && (
+                          <p>
+                            Fallback Method uses built-in browser capabilities for testing. Works reliably across all
+                            devices and connections.
+                          </p>
+                        )}
+                      </div>
+                    </div>
                   </div>
+                </div>
+                <div className="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      const defaultConfig = {
+                        showDownload: true,
+                        showUpload: true,
+                        showPing: true,
+                        showJitter: true,
+                        showPacketLoss: true,
+                        showLiveGraphs: true,
+                        speedUnit: "Mbps",
+                        speedTestLibrary: "fallback",
+                      }
+                      setConfig(defaultConfig)
+                      localStorage.setItem("speedTestConfig", JSON.stringify(defaultConfig))
+                    }}
+                    className="w-full"
+                  >
+                    Reset to Default Settings
+                  </Button>
                 </div>
               </CardContent>
             </Card>

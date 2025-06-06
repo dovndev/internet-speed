@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
-import { AccurateSpeedTestService } from "@/lib/accurate-speed-test"
+import { AccurateSpeedTestService, type SpeedTestLibrary } from "@/lib/accurate-speed-test"
 
 interface SpeedTestResult {
   downloadSpeed: number
@@ -11,42 +11,48 @@ interface SpeedTestResult {
   packetLoss: number
 }
 
-interface SpeedTestProgress {
-  phase: "idle" | "ping" | "download" | "upload" | "complete"
-  progress: number
-  data: Partial<SpeedTestResult>
-  liveData?: {
+export function useAccurateSpeedTest() {
+  const [isTestRunning, setIsTestRunning] = useState(false)
+  const [testProgress, setTestProgress] = useState(0)
+  const [testPhase, setTestPhase] = useState<"idle" | "ping" | "download" | "upload" | "complete">("idle")
+  const [currentTest, setCurrentTest] = useState<Partial<SpeedTestResult>>({})
+  const [liveData, setLiveData] = useState<{
     currentDownload?: number
     currentUpload?: number
     currentPing?: number
     currentJitter?: number
-  }
-}
-
-export function useAccurateSpeedTest() {
-  const [isTestRunning, setIsTestRunning] = useState(false)
-  const [testProgress, setTestProgress] = useState(0)
-  const [testPhase, setTestPhase] = useState<SpeedTestProgress["phase"]>("idle")
-  const [currentTest, setCurrentTest] = useState<Partial<SpeedTestResult>>({})
-  const [liveData, setLiveData] = useState<SpeedTestProgress["liveData"]>({})
+  }>({})
   const [error, setError] = useState<string | null>(null)
   const [finalResults, setFinalResults] = useState<SpeedTestResult | null>(null)
+  const [library, setLibraryState] = useState<SpeedTestLibrary>("fallback")
 
-  const speedTestService = useRef(new AccurateSpeedTestService())
+  const speedTestServiceRef = useRef<AccurateSpeedTestService>(new AccurateSpeedTestService("fallback"))
+  const updateIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Set the library
+  const setLibrary = useCallback((newLibrary: SpeedTestLibrary) => {
+    setLibraryState(newLibrary)
+    speedTestServiceRef.current.setLibrary(newLibrary)
+  }, [])
 
   // Force UI updates for live data
   useEffect(() => {
-    let interval: NodeJS.Timeout
-
     if (isTestRunning) {
-      interval = setInterval(() => {
+      // Create an interval to force UI updates
+      updateIntervalRef.current = setInterval(() => {
         // This forces a re-render to ensure live data is displayed
         setLiveData((prev) => ({ ...prev }))
       }, 100)
+    } else if (updateIntervalRef.current) {
+      clearInterval(updateIntervalRef.current)
+      updateIntervalRef.current = null
     }
 
     return () => {
-      if (interval) clearInterval(interval)
+      if (updateIntervalRef.current) {
+        clearInterval(updateIntervalRef.current)
+        updateIntervalRef.current = null
+      }
     }
   }, [isTestRunning])
 
@@ -60,7 +66,7 @@ export function useAccurateSpeedTest() {
     setFinalResults(null)
 
     try {
-      const results = await speedTestService.current.runSpeedTest((progress: SpeedTestProgress) => {
+      const results = await speedTestServiceRef.current.runSpeedTest((progress) => {
         setTestProgress(progress.progress)
         setTestPhase(progress.phase)
 
@@ -69,6 +75,7 @@ export function useAccurateSpeedTest() {
         }
 
         if (progress.liveData) {
+          // Directly update live data for immediate UI feedback
           setLiveData(progress.liveData)
         }
 
@@ -88,7 +95,7 @@ export function useAccurateSpeedTest() {
   }, [])
 
   const stopTest = useCallback(() => {
-    speedTestService.current.stopTest()
+    speedTestServiceRef.current.stopTest()
     setIsTestRunning(false)
     setTestPhase("idle")
   }, [])
@@ -110,8 +117,10 @@ export function useAccurateSpeedTest() {
     liveData,
     error,
     finalResults,
+    library,
     runSpeedTest,
     stopTest,
     resetTest,
+    setLibrary,
   }
 }
